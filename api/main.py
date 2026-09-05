@@ -121,6 +121,27 @@ def _row_to_match(row: pd.Series, include_book: bool = True) -> dict:
             }
         else:
             payload["bookmaker"] = None
+
+    # Edge vs market on the model's predicted class
+    book = payload.get("bookmaker") or {}
+    model_p = None
+    book_p = None
+    if pred == "H":
+        model_p, book_p = payload["probabilities"]["home"], book.get("p_home")
+    elif pred == "D":
+        model_p, book_p = payload["probabilities"]["draw"], book.get("p_draw")
+    elif pred == "A":
+        model_p, book_p = payload["probabilities"]["away"], book.get("p_away")
+    if model_p is not None and book_p is not None:
+        edge = float(model_p) - float(book_p)
+        payload["edge"] = {
+            "pp": round(edge * 100, 1),
+            "model_p": float(model_p),
+            "book_p": float(book_p),
+            "side": pred,
+        }
+    else:
+        payload["edge"] = None
     return payload
 
 
@@ -142,20 +163,11 @@ def fixtures_upcoming(
     from src.fixtures_refresh import filter_upcoming_frame, refresh_openfootball_statuses
     from src.live_odds import attach_live_odds
 
-    # Soft refresh: pull latest openfootball scores/fixtures on a throttle
+    # Soft refresh: openfootball + football-data results fallback (when OF lags)
+    played_match_ids: set[str] = set()
     try:
         fresh = refresh_openfootball_statuses(force=refresh)
         if fresh is not None and not fresh.empty:
-            # Drop any upcoming rows that now have scores in the fresh parse
-            played_ids = set(
-                fresh.loc[fresh["status"] == "played", "date"].astype(str)
-                + "_"
-                + fresh.loc[fresh["status"] == "played", "home_team"].astype(str)
-                + "_"
-                + fresh.loc[fresh["status"] == "played", "away_team"].astype(str)
-            )
-            # match_id format uses compact team names without spaces
-            played_match_ids = set()
             played = fresh[fresh["status"] == "played"].copy()
             if not played.empty:
                 played["match_id"] = (
@@ -165,12 +177,17 @@ def fixtures_upcoming(
                     + "_"
                     + played["away_team"].str.replace(" ", "", regex=False)
                 )
-                played_match_ids = set(played["match_id"])
-        else:
-            played_match_ids = set()
+                played_match_ids |= set(played["match_id"])
     except Exception as exc:  # noqa: BLE001
         print(f"fixture refresh skipped: {exc}")
-        played_match_ids = set()
+
+    try:
+        from src.results_fallback import apply_results_to_features, played_match_ids as fd_played
+
+        played_match_ids |= fd_played(force=refresh)
+        apply_results_to_features(force=False)
+    except Exception as exc:  # noqa: BLE001
+        print(f"football-data results fallback skipped: {exc}")
 
     df = _read_parquet("upcoming_predictions.parquet")
     if df.empty:
@@ -226,12 +243,126 @@ def ODDS_KEY_PRESENT() -> bool:
 
 
 @app.get("/fixtures/recent")
-def fixtures_recent(limit: int = Query(40, ge=1, le=200)):
-    df = _read_parquet("latest_predictions.parquet", "test_predictions.parquet")
-    if df.empty:
+def fixtures_recent(
+    limit: int = Query(40, ge=1, le=200),
+    season: str | None = Query(None, description="Prefer this season label, e.g. 2026-27"),
+    team: str | None = Query(None, description="Filter home/away team substring, e.g. Man United"),
+):
+    """
+    Analyst slate: newest-season played matches from features (live),
+    with probs/correct joined from latest_predictions when available.
+    Avoids stale May spillover from a mixed 40-row parquet artifact.
+    """
+    feats = _read_parquet("features.parquet", "matches_with_stats.parquet", "matches_with_odds.parquet")
+    scored = _read_parquet("latest_predictions.parquet", "test_predictions.parquet")
+    if feats.empty and scored.empty:
         raise HTTPException(404, "No recent predictions found")
+
+    df = feats.copy() if not feats.empty else scored.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    if "status" in df.columns:
+        df = df[df["status"] != "scheduled"]
+    if "outcome" in df.columns:
+        df = df[df["outcome"].notna()]
+
+    if season and "season" in df.columns:
+        df = df[df["season"] == season]
+    elif "season" in df.columns and not df.empty:
+        newest = sorted(df["season"].dropna().unique())[-1]
+        current = df[df["season"] == newest]
+        if len(current) >= 3:
+            df = current
+        else:
+            cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=21)
+            df = df[df["date"] >= cutoff]
+
+    if team:
+        t = team.strip().lower()
+        aliases = {
+            "united": "man united",
+            "man u": "man united",
+            "mufc": "man united",
+            "city": "man city",
+            "spurs": "tottenham",
+            "wolves": "wolves",
+            "nottingham": "nott'm forest",
+            "forest": "nott'm forest",
+        }
+        needle = aliases.get(t, t)
+        mask = df["home_team"].astype(str).str.lower().str.contains(needle, regex=False) | df[
+            "away_team"
+        ].astype(str).str.lower().str.contains(needle, regex=False)
+        df = df[mask]
+
     df = df.sort_values("date", ascending=False).head(limit)
-    return {"count": len(df), "matches": [_row_to_match(r) for _, r in df.iterrows()]}
+
+    # Join model probs / correct from scored artifact when present
+    if not scored.empty and "match_id" in df.columns and "match_id" in scored.columns:
+        keep = [
+            c
+            for c in [
+                "match_id",
+                "pred",
+                "p_H",
+                "p_D",
+                "p_A",
+                "correct",
+                "home_form_str",
+                "away_form_str",
+                "odds_h",
+                "odds_d",
+                "odds_a",
+                "book_p_h",
+                "book_p_d",
+                "book_p_a",
+            ]
+            if c in scored.columns
+        ]
+        scored_slim = scored[keep].drop_duplicates("match_id")
+        drop_overlap = [c for c in keep if c != "match_id" and c in df.columns]
+        df = df.drop(columns=drop_overlap, errors="ignore").merge(
+            scored_slim, on="match_id", how="left"
+        )
+
+    need_score = "p_H" not in df.columns or df["p_H"].isna().any()
+    if need_score and not df.empty:
+        try:
+            from src.predict import _score_frame, load_best_model
+
+            name, bundle = load_best_model()
+            missing = df["p_H"].isna() if "p_H" in df.columns else pd.Series(True, index=df.index)
+            if missing.any():
+                scored_part = _score_frame(df.loc[missing].copy(), bundle, name)
+                for col in ("pred", "p_H", "p_D", "p_A", "correct"):
+                    if col in scored_part.columns:
+                        df.loc[missing, col] = scored_part[col].values
+        except Exception as exc:  # noqa: BLE001
+            print(f"recent scoring skipped: {exc}")
+
+    matches = [_row_to_match(r) for _, r in df.iterrows()]
+    graded = [m for m in matches if m.get("correct") is not None]
+    n_ok = sum(1 for m in graded if m.get("correct") is True)
+    strip = [
+        {"match_id": m["match_id"], "correct": m.get("correct"), "label": "C" if m.get("correct") else "M"}
+        for m in matches[:10]
+        if m.get("correct") is not None
+    ]
+    last10_ok = sum(1 for s in strip if s["correct"])
+
+    return {
+        "count": len(df),
+        "season": season or (str(df["season"].iloc[0]) if "season" in df.columns and len(df) else None),
+        "matches": matches,
+        "hit_rate": {
+            "n": int(len(graded)),
+            "correct": int(n_ok),
+            "rate": round(float(n_ok) / len(graded), 3) if graded else None,
+            "last_n": len(strip),
+            "last_n_correct": last10_ok,
+            "last_n_rate": round(last10_ok / len(strip), 3) if strip else None,
+            "strip": strip,
+        },
+    }
 
 
 @app.get("/match/{match_id}")
@@ -253,7 +384,6 @@ def match_detail(match_id: str):
         raise HTTPException(404, f"Match {match_id} not found")
     row = frames[0]
 
-    # Enrich from features if needed
     feats = _read_parquet("features.parquet")
     if not feats.empty and "match_id" in feats.columns:
         frow = feats[feats["match_id"] == match_id]
@@ -264,8 +394,8 @@ def match_detail(match_id: str):
 
     detail = _row_to_match(row)
 
-    # Attach live odds for scheduled fixtures when historical odds are missing
-    if detail.get("bookmaker", {}).get("p_home") is None:
+    book = detail.get("bookmaker") or {}
+    if book.get("p_home") is None:
         try:
             from src.live_odds import fetch_live_odds_table
 
@@ -288,10 +418,40 @@ def match_detail(match_id: str):
                         "p_draw": float(h["book_p_d"]),
                         "p_away": float(h["book_p_a"]),
                     }
+                    pred = detail.get("prediction")
+                    probs = detail.get("probabilities") or {}
+                    bp = detail["bookmaker"]
+                    mp = bp_map = None
+                    if pred == "H":
+                        mp, bp_map = probs.get("home"), bp.get("p_home")
+                    elif pred == "D":
+                        mp, bp_map = probs.get("draw"), bp.get("p_draw")
+                    elif pred == "A":
+                        mp, bp_map = probs.get("away"), bp.get("p_away")
+                    if mp is not None and bp_map is not None:
+                        edge = float(mp) - float(bp_map)
+                        detail["edge"] = {
+                            "pp": round(edge * 100, 1),
+                            "model_p": float(mp),
+                            "book_p": float(bp_map),
+                            "side": pred,
+                        }
         except Exception as exc:  # noqa: BLE001
             print(f"live odds detail skipped: {exc}")
 
-    # SHAP
+    try:
+        from src.poisson_scores import top_scorelines
+
+        snap = detail.get("stats_snapshot") or {}
+        detail["scorelines"] = top_scorelines(
+            snap.get("home_xg_for_5"),
+            snap.get("away_xg_for_5"),
+            top_n=5,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"scorelines skipped: {exc}")
+        detail["scorelines"] = []
+
     shap_payload = None
     xgb_path = MODELS_DIR / "xgboost.joblib"
     model_path = xgb_path if xgb_path.exists() else next(MODELS_DIR.glob("*.joblib"), None)
@@ -302,12 +462,7 @@ def match_detail(match_id: str):
             shap_result = shap_top_features_for_row(bundle, frow.iloc[0])
             top = []
             for item in shap_result.get("top_features", [])[:8]:
-                top.append(
-                    {
-                        **item,
-                        "label": friendly_feature(item["feature"]),
-                    }
-                )
+                top.append({**item, "label": friendly_feature(item["feature"])})
             shap_payload = {
                 "predicted_class": shap_result["predicted_class"],
                 "probabilities": shap_result["probabilities"],
@@ -316,25 +471,23 @@ def match_detail(match_id: str):
             }
     detail["shap"] = shap_payload
 
-    # Cached explanation
     for cache_name in ("upcoming_explanations.json", "latest_explanations.json", "llm_explanations.json"):
         cache = _load_json(CACHE_DIR / cache_name)
         if not cache:
             continue
         items = cache.get("items", cache) if isinstance(cache, dict) else []
         if isinstance(items, dict) and match_id in items:
-            detail["explanation"] = items[match_id].get("text") if isinstance(items[match_id], dict) else items[match_id]
+            entry = items[match_id]
+            detail["explanation"] = entry.get("text") if isinstance(entry, dict) else entry
             break
         if isinstance(items, list):
             for it in items:
-                if it.get("match_id") == match_id and it.get("explanation"):
-                    detail["explanation"] = it["explanation"]
-                    detail["shap"] = detail.get("shap") or {
-                        "top_features": it.get("top_features"),
-                        "probabilities": it.get("probabilities"),
-                        "predicted_class": it.get("pred"),
-                    }
+                if not isinstance(it, dict):
+                    continue
+                if it.get("match_id") == match_id:
+                    detail["explanation"] = it.get("text") or it.get("explanation")
                     break
+
     return detail
 
 

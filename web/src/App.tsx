@@ -5,6 +5,8 @@ import {
   fetchMetrics,
   fetchRecent,
   fetchUpcoming,
+  formatEdge,
+  HitRate,
   MatchCard,
   pct,
   predictedPct,
@@ -21,6 +23,39 @@ import {
 } from "recharts";
 
 type Mode = "fans" | "analyst";
+
+const TEAM_SEARCH_ALIASES: Record<string, string> = {
+  united: "man united",
+  "man u": "man united",
+  mufc: "man united",
+  city: "man city",
+  "man city": "man city",
+  spurs: "tottenham",
+  arsenal: "arsenal",
+  chelsea: "chelsea",
+  liverpool: "liverpool",
+  wolves: "wolves",
+  forest: "nott'm forest",
+  nottingham: "nott'm forest",
+  villa: "aston villa",
+  palace: "crystal palace",
+  hammers: "west ham",
+  toon: "newcastle",
+  magpies: "newcastle",
+};
+
+function teamNeedle(query: string): string {
+  const q = query.trim().toLowerCase();
+  if (!q) return "";
+  return TEAM_SEARCH_ALIASES[q] ?? q;
+}
+
+function matchIncludesTeam(m: MatchCard, needle: string): boolean {
+  if (!needle) return true;
+  const home = (m.home_team || "").toLowerCase();
+  const away = (m.away_team || "").toLowerCase();
+  return home.includes(needle) || away.includes(needle);
+}
 
 function ProbBars({ p }: { p: MatchCard["probabilities"] }) {
   const rows = [
@@ -52,10 +87,46 @@ function Badge({ m }: { m: MatchCard }) {
   return null;
 }
 
+function EdgePill({ m }: { m: MatchCard }) {
+  const label = formatEdge(m.edge);
+  if (!label) return null;
+  const pos = (m.edge?.pp ?? 0) > 0;
+  const neg = (m.edge?.pp ?? 0) < 0;
+  return (
+    <span className={`badge edge ${pos ? "pos" : neg ? "neg" : ""}`} title="Model vs bookmaker on predicted side">
+      Edge {label}
+    </span>
+  );
+}
+
+function buildShareText(m: MatchCard): string {
+  const edge = formatEdge(m.edge);
+  const lines = [
+    `PitchPulse pick`,
+    `${m.home_team} vs ${m.away_team}`,
+    `${m.date}${m.kickoff ? ` · ${m.kickoff}` : ""}`,
+    `${m.prediction_label || m.prediction} · ${predictedPct(m)}`,
+    `Model H/D/A: ${pct(m.probabilities.home)} / ${pct(m.probabilities.draw)} / ${pct(m.probabilities.away)}`,
+  ];
+  if (m.bookmaker?.p_home != null) {
+    lines.push(
+      `Book H/D/A: ${pct(m.bookmaker.p_home)} / ${pct(m.bookmaker.p_draw)} / ${pct(m.bookmaker.p_away)}`
+    );
+  }
+  if (edge) lines.push(`Edge vs market: ${edge}`);
+  if (m.scorelines?.length) {
+    lines.push(`Top scorelines: ${m.scorelines.slice(0, 3).map((s) => `${s.score} (${pct(s.probability)})`).join(", ")}`);
+  }
+  if (m.explanation) lines.push("", m.explanation);
+  lines.push("", "#PitchPulse #PremierLeague");
+  return lines.join("\n");
+}
+
 export default function App() {
   const [mode, setMode] = useState<Mode>("fans");
   const [upcoming, setUpcoming] = useState<MatchCard[]>([]);
   const [recent, setRecent] = useState<MatchCard[]>([]);
+  const [hitRate, setHitRate] = useState<HitRate | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<MatchCard | null>(null);
   const [metrics, setMetrics] = useState<any>(null);
@@ -63,18 +134,21 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [explaining, setExplaining] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [teamQuery, setTeamQuery] = useState("");
+  const [matchweek, setMatchweek] = useState<number | "all">("all");
+  const [shareMsg, setShareMsg] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         setLoading(true);
-        const [u, r] = await Promise.all([fetchUpcoming(40), fetchRecent(40)]);
+        const [u, r] = await Promise.all([fetchUpcoming(80), fetchRecent(40)]);
         if (cancelled) return;
         setUpcoming(u.matches);
         setRecent(r.matches);
+        setHitRate(r.hit_rate || null);
         setOddsNote((u as any).odds_note || null);
-        // Prefer Everton vs Man United weekend if present, else first upcoming
         const everton = u.matches.find(
           (m) =>
             m.home_team === "Everton" &&
@@ -118,7 +192,69 @@ export default function App() {
       .catch(() => setMetrics(null));
   }, [mode]);
 
-  const list = mode === "fans" ? upcoming : recent.length ? recent : upcoming;
+  const needle = teamNeedle(teamQuery);
+  const searching = Boolean(needle);
+
+  const matchweeks = useMemo(() => {
+    const set = new Set<number>();
+    for (const m of [...upcoming, ...recent]) {
+      if (m.matchday != null && !Number.isNaN(Number(m.matchday))) set.add(Number(m.matchday));
+    }
+    return Array.from(set).sort((a, b) => a - b);
+  }, [upcoming, recent]);
+
+  const clubHub = useMemo(() => {
+    if (!searching) return null;
+    const clubMatches = [...upcoming, ...recent].filter((m) => matchIncludesTeam(m, needle));
+    const played = clubMatches
+      .filter((m) => m.outcome != null)
+      .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+    const form = played
+      .slice(-5)
+      .map((m) => {
+        const isHome = (m.home_team || "").toLowerCase().includes(needle);
+        if (m.outcome === "D") return "D";
+        if (isHome) return m.outcome === "H" ? "W" : "L";
+        return m.outcome === "A" ? "W" : "L";
+      })
+      .join("-");
+    const next5 = clubMatches
+      .filter((m) => m.status === "scheduled" || m.outcome == null)
+      .sort((a, b) => (a.date || "").localeCompare(b.date || ""))
+      .slice(0, 5);
+    const label = teamQuery.trim() || needle;
+    return { label, form: form || "—", next5, nPlayed: played.length };
+  }, [searching, needle, teamQuery, upcoming, recent]);
+
+  const list = useMemo(() => {
+    let base: MatchCard[];
+    if (searching) {
+      const byId = new Map<string, MatchCard>();
+      for (const m of [...upcoming, ...recent]) {
+        if (matchIncludesTeam(m, needle)) byId.set(m.match_id, m);
+      }
+      base = Array.from(byId.values()).sort((a, b) => {
+        const da = a.date || "";
+        const db = b.date || "";
+        if (da !== db) return db.localeCompare(da);
+        return (b.kickoff || "").localeCompare(a.kickoff || "");
+      });
+    } else if (mode === "fans") {
+      base = upcoming;
+    } else {
+      base = recent.length ? recent : upcoming;
+    }
+    if (matchweek !== "all") {
+      base = base.filter((m) => Number(m.matchday) === matchweek);
+    }
+    return base;
+  }, [mode, upcoming, recent, needle, searching, matchweek]);
+
+  const listTitle = searching
+    ? `${teamQuery.trim()} fixtures`
+    : mode === "fans"
+      ? "This week's slate"
+      : "Recent results";
 
   const shapChart = useMemo(() => {
     const top = detail?.shap?.top_features || [];
@@ -141,6 +277,18 @@ export default function App() {
     }
   }
 
+  async function onShare() {
+    if (!detail) return;
+    const text = buildShareText(detail);
+    try {
+      await navigator.clipboard.writeText(text);
+      setShareMsg("Copied pick to clipboard");
+    } catch {
+      setShareMsg("Could not copy — select and copy manually");
+    }
+    setTimeout(() => setShareMsg(null), 2500);
+  }
+
   return (
     <div className="app">
       <header className="topbar">
@@ -154,10 +302,7 @@ export default function App() {
           </p>
         </div>
         <div className="mode-toggle" role="tablist">
-          <button
-            className={mode === "fans" ? "active" : ""}
-            onClick={() => setMode("fans")}
-          >
+          <button className={mode === "fans" ? "active" : ""} onClick={() => setMode("fans")}>
             Fans
           </button>
           <button
@@ -173,10 +318,96 @@ export default function App() {
       {error && <p className="error">{error}</p>}
 
       {!loading && (
-        <div className={`grid ${mode === "fans" ? "two" : ""}`}>
+        <div className={`grid ${mode === "fans" || searching ? "two" : ""}`}>
           <section className="card">
-            <h2>{mode === "fans" ? "This week's slate" : "Recent results"}</h2>
-            {mode === "fans" && oddsNote && <p className="odds-note">{oddsNote}</p>}
+            <h2>{listTitle}</h2>
+
+            <div className="team-search">
+              <input
+                type="search"
+                placeholder="Search club — e.g. United, Spurs, Villa"
+                value={teamQuery}
+                onChange={(e) => setTeamQuery(e.target.value)}
+                aria-label="Search fixtures by club"
+              />
+              {teamQuery && (
+                <button type="button" className="clear-search" onClick={() => setTeamQuery("")}>
+                  Clear
+                </button>
+              )}
+            </div>
+
+            {matchweeks.length > 0 && (
+              <div className="mw-chips" role="group" aria-label="Matchweek filter">
+                <button
+                  type="button"
+                  className={matchweek === "all" ? "active" : ""}
+                  onClick={() => setMatchweek("all")}
+                >
+                  All GW
+                </button>
+                {matchweeks.map((mw) => (
+                  <button
+                    key={mw}
+                    type="button"
+                    className={matchweek === mw ? "active" : ""}
+                    onClick={() => setMatchweek(mw)}
+                  >
+                    GW{mw}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {mode === "fans" && !searching && oddsNote && <p className="odds-note">{oddsNote}</p>}
+            {searching && (
+              <p className="odds-note">Club view: upcoming and recent for this team.</p>
+            )}
+
+            {clubHub && (
+              <div className="club-hub">
+                <div>
+                  <strong>{clubHub.label}</strong>
+                  <span className="muted"> · form {clubHub.form}</span>
+                </div>
+                {clubHub.next5.length > 0 && (
+                  <div className="club-next">
+                    {clubHub.next5.map((m) => (
+                      <button
+                        key={m.match_id}
+                        type="button"
+                        className="chip linkish"
+                        onClick={() => setSelectedId(m.match_id)}
+                      >
+                        {m.date.slice(5)} {m.home_team} vs {m.away_team}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {mode === "analyst" && !searching && hitRate && hitRate.strip?.length > 0 && (
+              <div className="hit-rate">
+                <span>
+                  Last {hitRate.last_n}:{" "}
+                  <strong>
+                    {hitRate.last_n_correct}/{hitRate.last_n}
+                  </strong>{" "}
+                  ({pct(hitRate.last_n_rate)})
+                </span>
+                <div className="hit-strip">
+                  {hitRate.strip.map((s) => (
+                    <i
+                      key={s.match_id}
+                      className={s.correct ? "ok" : "miss"}
+                      title={s.correct ? "Correct" : "Missed"}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="match-list">
               {list.map((m) => (
                 <button
@@ -186,10 +417,14 @@ export default function App() {
                 >
                   <div className="meta">
                     <span>
+                      {m.matchday != null ? `GW${m.matchday} · ` : ""}
                       {m.date}
                       {m.kickoff ? ` · ${m.kickoff}` : ""}
                     </span>
-                    <Badge m={m} />
+                    <span className="badge-row">
+                      <EdgePill m={m} />
+                      <Badge m={m} />
+                    </span>
                   </div>
                   <div className="teams">
                     {m.home_team} vs {m.away_team}
@@ -206,7 +441,13 @@ export default function App() {
               ))}
               {!list.length && (
                 <p className="muted">
-                  No fixtures yet. Run <code>python run_pipeline.py</code> then restart the API.
+                  {searching ? (
+                    "No fixtures for that club in the loaded slate."
+                  ) : (
+                    <>
+                      No fixtures yet. Run <code>python run_pipeline.py</code> then restart the API.
+                    </>
+                  )}
                 </p>
               )}
             </div>
@@ -219,9 +460,17 @@ export default function App() {
                 <h2>
                   {detail.home_team} vs {detail.away_team}
                 </h2>
-                <div className="meta muted" style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
-                  <span>{detail.date}{detail.kickoff ? ` · ${detail.kickoff}` : ""}</span>
+                <div
+                  className="meta muted"
+                  style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", alignItems: "center" }}
+                >
+                  <span>
+                    {detail.matchday != null ? `GW${detail.matchday} · ` : ""}
+                    {detail.date}
+                    {detail.kickoff ? ` · ${detail.kickoff}` : ""}
+                  </span>
                   <Badge m={detail} />
+                  <EdgePill m={detail} />
                   {detail.outcome_label && <span>Actual: {detail.outcome_label}</span>}
                 </div>
 
@@ -229,10 +478,12 @@ export default function App() {
 
                 <div className="stat-chips">
                   <span className="chip">
-                    Home xG (L5) <strong>{Number(detail.stats_snapshot?.home_xg_for_5 || 0).toFixed(2)}</strong>
+                    Home xG (L5){" "}
+                    <strong>{Number(detail.stats_snapshot?.home_xg_for_5 || 0).toFixed(2)}</strong>
                   </span>
                   <span className="chip">
-                    Away xG (L5) <strong>{Number(detail.stats_snapshot?.away_xg_for_5 || 0).toFixed(2)}</strong>
+                    Away xG (L5){" "}
+                    <strong>{Number(detail.stats_snapshot?.away_xg_for_5 || 0).toFixed(2)}</strong>
                   </span>
                   <span className="chip">
                     Shots gap{" "}
@@ -269,21 +520,39 @@ export default function App() {
                       </>
                     ) : (
                       <p className="muted" style={{ margin: 0 }}>
-                        Pre-match odds aren’t in the historical CSV for unplayed games.
-                        Add a free <code>THE_ODDS_API_KEY</code> to <code>.env</code> and
-                        restart the API to pull live prices.
+                        Live book odds attach when the Odds API cache has this fixture.
                       </p>
                     )}
                   </div>
                 </div>
 
-                {detail.explanation ? (
-                  <p className="explain">{detail.explanation}</p>
-                ) : (
-                  <button className="primary" onClick={onExplain} disabled={explaining}>
-                    {explaining ? "Writing explanation…" : "Explain this pick"}
-                  </button>
+                {detail.scorelines && detail.scorelines.length > 0 && (
+                  <div className="scorelines">
+                    <h3>Likely scorelines</h3>
+                    <p className="odds-note">Independent Poisson from L5 xG (not the classifier).</p>
+                    <div className="score-row">
+                      {detail.scorelines.map((s) => (
+                        <span key={s.score} className="chip">
+                          {s.score} <strong>{pct(s.probability)}</strong>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
                 )}
+
+                <div className="action-row">
+                  {detail.explanation ? (
+                    <p className="explain">{detail.explanation}</p>
+                  ) : (
+                    <button className="primary" onClick={onExplain} disabled={explaining}>
+                      {explaining ? "Writing explanation…" : "Explain this pick"}
+                    </button>
+                  )}
+                  <button type="button" className="secondary" onClick={onShare}>
+                    Share pick
+                  </button>
+                  {shareMsg && <span className="share-msg">{shareMsg}</span>}
+                </div>
 
                 {mode === "analyst" && shapChart.length > 0 && (
                   <div style={{ marginTop: "1.25rem", height: 260 }}>
@@ -313,7 +582,7 @@ export default function App() {
             )}
           </section>
 
-          {mode === "analyst" && (
+          {mode === "analyst" && !searching && (
             <section className="card" style={{ gridColumn: "1 / -1" }}>
               <h2>Model scoreboard</h2>
               {!metrics && <p className="muted">Metrics not loaded</p>}

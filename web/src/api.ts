@@ -1,5 +1,29 @@
 export type Probabilities = { home: number; draw: number; away: number };
 
+export type Edge = {
+  pp: number;
+  model_p: number;
+  book_p: number;
+  side?: string | null;
+} | null;
+
+export type Scoreline = {
+  home_goals: number;
+  away_goals: number;
+  score: string;
+  probability: number;
+};
+
+export type HitRate = {
+  n: number;
+  correct: number;
+  rate: number | null;
+  last_n: number;
+  last_n_correct: number;
+  last_n_rate: number | null;
+  strip: Array<{ match_id: string; correct: boolean | null; label: string }>;
+};
+
 export type MatchCard = {
   match_id: string;
   date: string;
@@ -24,7 +48,9 @@ export type MatchCard = {
     p_home?: number | null;
     p_draw?: number | null;
     p_away?: number | null;
-  };
+  } | null;
+  edge?: Edge;
+  scorelines?: Scoreline[];
   stats_snapshot?: Record<string, number | null | undefined>;
   shap?: {
     predicted_class?: string;
@@ -53,12 +79,14 @@ async function get<T>(path: string): Promise<T> {
 
 export function fetchUpcoming(limit = 40) {
   return get<{ count: number; matches: MatchCard[]; odds_note?: string }>(
-    `/fixtures/upcoming?limit=${limit}&days=21`
+    `/fixtures/upcoming?limit=${limit}&days=45`
   );
 }
 
 export function fetchRecent(limit = 40) {
-  return get<{ count: number; matches: MatchCard[] }>(`/fixtures/recent?limit=${limit}`);
+  return get<{ count: number; matches: MatchCard[]; hit_rate?: HitRate; season?: string }>(
+    `/fixtures/recent?limit=${limit}`
+  );
 }
 
 export function fetchMatch(id: string) {
@@ -93,6 +121,11 @@ export function predictedPct(m: {
   if (key === "H") return pct(p.home);
   if (key === "D") return pct(p.draw);
   if (key === "A") return pct(p.away);
-  // fallback: show max
   return pct(Math.max(p.home, p.draw, p.away));
+}
+
+export function formatEdge(edge?: Edge) {
+  if (!edge || edge.pp == null) return null;
+  const sign = edge.pp > 0 ? "+" : "";
+  return `${sign}${edge.pp.toFixed(1)}pp`;
 }
