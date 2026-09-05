@@ -1,0 +1,346 @@
+:root {
+  /* Cool slate + soft accent — less swamp/ogre green */
+  --bg: #0e1420;
+  --bg-2: #161e2e;
+  --ink: #eef2f8;
+  --muted: #93a0b8;
+  --accent: #6ec8ff;
+  --accent-2: #f0b429;
+  --home: #3dd68c;
+  --draw: #f0b429;
+  --away: #6ec8ff;
+  --wrong: #ff6b7a;
+  --card: rgba(22, 30, 46, 0.92);
+  --card-selected: rgba(40, 58, 88, 0.95);
+  --line: rgba(238, 242, 248, 0.1);
+  --line-strong: rgba(110, 200, 255, 0.55);
+  --radius: 18px;
+  --font-display: "Archivo Black", Impact, sans-serif;
+  --font-body: "DM Sans", system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: var(--font-body);
+  color: var(--ink);
+  background:
+    radial-gradient(ellipse 70% 45% at 80% -5%, rgba(110, 200, 255, 0.16), transparent),
+    radial-gradient(ellipse 50% 40% at 10% 100%, rgba(240, 180, 41, 0.08), transparent),
+    linear-gradient(165deg, #0e1420 0%, #121a2b 45%, #0c1018 100%);
+  background-attachment: fixed;
+}
+
+button,
+select {
+  font: inherit;
+}
+
+.app {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.25rem 1.25rem 3rem;
+}
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.75rem;
+}
+
+.brand {
+  font-family: var(--font-display);
+  font-size: clamp(2rem, 5vw, 3rem);
+  letter-spacing: -0.02em;
+  line-height: 0.95;
+  margin: 0;
+}
+
+.brand span {
+  color: var(--accent);
+}
+
+.tagline {
+  color: var(--muted);
+  margin: 0.4rem 0 0;
+  max-width: 36rem;
+}
+
+.mode-toggle {
+  display: inline-flex;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.25rem;
+  gap: 0.2rem;
+}
+
+.mode-toggle button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 0.55rem 1rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.mode-toggle button.active {
+  background: var(--accent);
+  color: #0a1220;
+  font-weight: 700;
+}
+
+.grid {
+  display: grid;
+  gap: 1rem;
+}
+
+@media (min-width: 800px) {
+  .grid.two {
+    grid-template-columns: 1.1fr 0.9fr;
+  }
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.1rem 1.2rem;
+  backdrop-filter: blur(8px);
+}
+
+.card h2,
+.card h3 {
+  font-family: var(--font-display);
+  letter-spacing: -0.01em;
+  margin: 0 0 0.75rem;
+}
+
+.match-list {
+  display: grid;
+  gap: 0.75rem;
+  max-height: 70vh;
+  overflow: auto;
+  padding-right: 0.25rem;
+}
+
+.match-item {
+  text-align: left;
+  width: 100%;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  border-radius: 14px;
+  padding: 0.9rem 1rem;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+
+.match-item:hover {
+  border-color: rgba(110, 200, 255, 0.35);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.match-item.selected {
+  border-color: var(--line-strong);
+  background: var(--card-selected);
+  box-shadow:
+    0 0 0 1px rgba(110, 200, 255, 0.35),
+    0 8px 24px rgba(0, 0, 0, 0.35);
+  transform: translateY(-1px);
+}
+
+.match-item .meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-bottom: 0.35rem;
+}
+
+.match-item .teams {
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.match-item .pick {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.badge.ok {
+  background: rgba(61, 214, 140, 0.18);
+  color: var(--home);
+}
+
+.badge.miss {
+  background: rgba(255, 107, 122, 0.18);
+  color: var(--wrong);
+}
+
+.badge.soon {
+  background: rgba(110, 200, 255, 0.16);
+  color: var(--accent);
+}
+
+.prob-row {
+  display: grid;
+  gap: 0.65rem;
+  margin: 1rem 0;
+}
+
+.prob {
+  display: grid;
+  grid-template-columns: 5.5rem 1fr 3.2rem;
+  gap: 0.6rem;
+  align-items: center;
+  font-size: 0.95rem;
+}
+
+.bar {
+  height: 0.7rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.bar > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+}
+
+.bar.home > i {
+  background: var(--home);
+}
+.bar.draw > i {
+  background: var(--draw);
+}
+.bar.away > i {
+  background: var(--away);
+}
+
+.stat-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.75rem 0 0;
+}
+
+.chip {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.chip strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.book-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.book-grid .mini {
+  background: rgba(0, 0, 0, 0.22);
+  border-radius: 12px;
+  padding: 0.75rem;
+}
+
+.book-grid .mini h4 {
+  margin: 0 0 0.4rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.explain {
+  margin-top: 1rem;
+  line-height: 1.55;
+  color: #d8e2f0;
+}
+
+.primary {
+  margin-top: 0.75rem;
+  border: 0;
+  background: linear-gradient(135deg, var(--accent), #8ad4ff);
+  color: #0a1220;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 0.65rem 1.1rem;
+  cursor: pointer;
+}
+
+.primary:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: 0.55rem 0.4rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.table th {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.error {
+  color: var(--wrong);
+}
+
+.loading {
+  color: var(--muted);
+  padding: 2rem 0;
+}
+
+.odds-note {
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin: 0.35rem 0 0.75rem;
+}

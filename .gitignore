@@ -1,0 +1,41 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+Thumbs.db
+
+# Local data / artifacts (keep directory structure via .gitkeep)
+data/raw/openfootball/
+data/raw/odds/
+data/raw/understat/
+data/raw/fbref/
+data/processed/
+models/*.joblib
+models/*.pkl
+cache/*.json
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!models/.gitkeep
+!cache/.gitkeep
+
+# Frontend
+web/node_modules/
+web/dist/
+
+# Notebooks checkpoints
+.ipynb_checkpoints/
+
+# IDE
+.idea/
+.vscode/
+*.swp

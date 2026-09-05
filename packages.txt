@@ -1,0 +1,2 @@
+# Empty: all deps are pure Python / wheels via requirements.txt
+# Kept so Streamlit Community Cloud has an explicit apt packages file if needed later.

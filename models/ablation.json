@@ -1,0 +1,37 @@
+{
+  "base_only": {
+    "name": "base_only",
+    "log_loss": 0.9965229706190125,
+    "brier": 0.595296935505555,
+    "accuracy": 0.5151515151515151,
+    "n_features": 26
+  },
+  "full_with_xg_shots_poss": {
+    "name": "full_with_xg_shots_poss",
+    "log_loss": 0.9983513916424037,
+    "brier": 0.5955483803468362,
+    "accuracy": 0.5203463203463203,
+    "n_features": 40
+  },
+  "delta": {
+    "log_loss_full_minus_base": 0.0018284210233912024,
+    "log_loss_improvement": -0.0018284210233912024,
+    "advanced_features": [
+      "home_xg_for_5",
+      "home_xg_against_5",
+      "away_xg_for_5",
+      "away_xg_against_5",
+      "xg_for_diff_5",
+      "xg_against_diff_5",
+      "home_shots_5",
+      "away_shots_5",
+      "home_sot_5",
+      "away_sot_5",
+      "shots_diff_5",
+      "home_poss_5",
+      "away_poss_5",
+      "poss_diff_5"
+    ],
+    "note": "Negative log_loss_full_minus_base means advanced stats helped. Honest reporting matters either way."
+  }
+}
