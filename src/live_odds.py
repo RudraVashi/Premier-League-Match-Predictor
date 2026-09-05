@@ -10,12 +10,12 @@ import requests
 from dotenv import load_dotenv
 from rapidfuzz import fuzz, process
 
-from src.utils import implied_probs, normalize_team
+from src.utils import ROOT, implied_probs, normalize_team
 
-load_dotenv()
+load_dotenv(ROOT / ".env", override=True)
 
 # Free tier: https://the-odds-api.com/
-ODDS_API_KEY = os.getenv("THE_ODDS_API_KEY", "").strip()
+ODDS_API_KEY = (os.getenv("THE_ODDS_API_KEY") or "").strip().strip('"').strip("'")
 ODDS_API_URL = "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
 
 
@@ -43,14 +43,16 @@ def fetch_live_odds_table() -> pd.DataFrame:
     Returns DataFrame: date, home_team, away_team, odds_h, odds_d, odds_a, book_p_*.
     Empty if no API key or request fails.
     """
-    if not ODDS_API_KEY or ODDS_API_KEY.startswith("your_"):
+    load_dotenv(ROOT / ".env", override=True)
+    api_key = (os.getenv("THE_ODDS_API_KEY") or "").strip().strip('"').strip("'")
+    if not api_key or api_key.startswith("your_"):
         return pd.DataFrame()
 
     try:
         resp = requests.get(
             ODDS_API_URL,
             params={
-                "apiKey": ODDS_API_KEY,
+                "apiKey": api_key,
                 "regions": "uk,eu",
                 "markets": "h2h",
                 "oddsFormat": "decimal",

@@ -19,7 +19,15 @@ if str(ROOT) not in sys.path:
 from src.labels import FEATURE_LABELS, friendly_feature, OUTCOME_LABELS
 from src.llm_explain import explain_match
 from src.shap_explain import shap_top_features_for_row
-from src.utils import CACHE_DIR, DATA_PROCESSED, MODELS_DIR
+from src.utils import CACHE_DIR, DATA_PROCESSED, MODELS_DIR, ROOT
+
+# Ensure API process sees project .env regardless of shell cwd
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(ROOT / ".env", override=True)
+except Exception:
+    pass
 
 app = FastAPI(
     title="EPL Match Outcome Predictor API",
@@ -101,14 +109,18 @@ def _row_to_match(row: pd.Series, include_book: bool = True) -> dict:
         },
     }
     if include_book:
-        payload["bookmaker"] = {
-            "odds_home": fget("odds_h"),
-            "odds_draw": fget("odds_d"),
-            "odds_away": fget("odds_a"),
-            "p_home": fget("book_p_h"),
-            "p_draw": fget("book_p_d"),
-            "p_away": fget("book_p_a"),
-        }
+        ph, pd_, pa = fget("book_p_h"), fget("book_p_d"), fget("book_p_a")
+        if ph is not None and pd_ is not None and pa is not None:
+            payload["bookmaker"] = {
+                "odds_home": fget("odds_h"),
+                "odds_draw": fget("odds_d"),
+                "odds_away": fget("odds_a"),
+                "p_home": ph,
+                "p_draw": pd_,
+                "p_away": pa,
+            }
+        else:
+            payload["bookmaker"] = None
     return payload
 
 
@@ -125,36 +137,78 @@ def health():
 def fixtures_upcoming(
     limit: int = Query(40, ge=1, le=100),
     days: int = Query(21, ge=1, le=120, description="Only fixtures within N days"),
+    refresh: bool = Query(False, description="Force re-download openfootball fixtures"),
 ):
+    from src.fixtures_refresh import filter_upcoming_frame, refresh_openfootball_statuses
+    from src.live_odds import attach_live_odds
+
+    # Soft refresh: pull latest openfootball scores/fixtures on a throttle
+    try:
+        fresh = refresh_openfootball_statuses(force=refresh)
+        if fresh is not None and not fresh.empty:
+            # Drop any upcoming rows that now have scores in the fresh parse
+            played_ids = set(
+                fresh.loc[fresh["status"] == "played", "date"].astype(str)
+                + "_"
+                + fresh.loc[fresh["status"] == "played", "home_team"].astype(str)
+                + "_"
+                + fresh.loc[fresh["status"] == "played", "away_team"].astype(str)
+            )
+            # match_id format uses compact team names without spaces
+            played_match_ids = set()
+            played = fresh[fresh["status"] == "played"].copy()
+            if not played.empty:
+                played["match_id"] = (
+                    pd.to_datetime(played["date"]).dt.strftime("%Y%m%d")
+                    + "_"
+                    + played["home_team"].str.replace(" ", "", regex=False)
+                    + "_"
+                    + played["away_team"].str.replace(" ", "", regex=False)
+                )
+                played_match_ids = set(played["match_id"])
+        else:
+            played_match_ids = set()
+    except Exception as exc:  # noqa: BLE001
+        print(f"fixture refresh skipped: {exc}")
+        played_match_ids = set()
+
     df = _read_parquet("upcoming_predictions.parquet")
     if df.empty:
         raise HTTPException(
             404,
             "No upcoming predictions. Run: python run_pipeline.py or python -m src.predict --upcoming",
         )
-    df = df.sort_values(["date", "kickoff", "home_team"])
-    try:
-        from src.live_odds import attach_live_odds
 
+    if played_match_ids and "match_id" in df.columns:
+        df = df[~df["match_id"].isin(played_match_ids)]
+
+    df = df.sort_values(["date", "kickoff", "home_team"])
+    # Drop kickoffs that already happened (Ipswich vs Liverpool yesterday, etc.)
+    df = filter_upcoming_frame(df)
+
+    try:
         df = attach_live_odds(df)
     except Exception as exc:  # noqa: BLE001
         print(f"live odds skipped: {exc}")
 
-    # Prefer near-term slate for Fans UI
     today = pd.Timestamp.now().normalize()
     dates = pd.to_datetime(df["date"])
-    near = df[(dates >= today - pd.Timedelta(days=1)) & (dates <= today + pd.Timedelta(days=days))]
+    near = df[dates <= today + pd.Timedelta(days=days)]
     if not near.empty:
         df = near
     df = df.head(limit)
+
     note = None
     if "_odds_note" in df.columns and len(df):
-        note = df["_odds_note"].iloc[0]
+        note = str(df["_odds_note"].iloc[0])
     elif not ODDS_KEY_PRESENT():
         note = (
             "No live odds yet — add THE_ODDS_API_KEY to .env (free at the-odds-api.com) "
             "and restart the API."
         )
+    elif len(df) and df.get("book_p_h") is not None and df["book_p_h"].notna().sum() == 0:
+        note = "Odds key loaded, but no live prices matched these fixtures yet."
+
     return {
         "count": len(df),
         "odds_note": note,
@@ -166,8 +220,8 @@ def ODDS_KEY_PRESENT() -> bool:
     import os
     from dotenv import load_dotenv
 
-    load_dotenv()
-    key = os.getenv("THE_ODDS_API_KEY", "").strip()
+    load_dotenv(ROOT / ".env", override=True)
+    key = (os.getenv("THE_ODDS_API_KEY") or "").strip().strip('"').strip("'")
     return bool(key) and not key.startswith("your_")
 
 

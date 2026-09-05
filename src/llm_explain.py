@@ -8,11 +8,20 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from src.utils import CACHE_DIR, ensure_dirs
+from src.labels import friendly_feature
+from src.utils import CACHE_DIR, ROOT, ensure_dirs
 
-load_dotenv()
+# Always load project-root .env (uvicorn cwd can be elsewhere)
+load_dotenv(ROOT / ".env", override=True)
 
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+MODEL_FALLBACKS = [
+    DEFAULT_MODEL,
+    "gemini-flash-lite-latest",
+    "gemini-3.5-flash-lite",
+    "gemini-flash-latest",
+    "gemini-3.6-flash",
+]
 CACHE_FILE = CACHE_DIR / "llm_explanations.json"
 
 
@@ -37,11 +46,16 @@ def _save_cache(cache: dict) -> None:
     CACHE_FILE.write_text(json.dumps(cache, indent=2), encoding="utf-8")
 
 
-from src.labels import friendly_feature
-
-
 def _friendly_feature(name: str) -> str:
     return friendly_feature(name)
+
+
+def _api_key() -> str | None:
+    load_dotenv(ROOT / ".env", override=True)
+    key = (os.getenv("GOOGLE_API_KEY") or "").strip().strip('"').strip("'")
+    if not key or key.startswith("your_"):
+        return None
+    return key
 
 
 def build_prompt(context: dict) -> str:
@@ -49,7 +63,6 @@ def build_prompt(context: dict) -> str:
     lines = []
     for f in top:
         direction = "supports home" if f["shap"] > 0 else "supports away/draw shift"
-        # SHAP sign depends on class; describe magnitude neutrally too
         lines.append(
             f"- {_friendly_feature(f['feature'])}: value={f['value']:.3f}, "
             f"SHAP={f['shap']:+.4f} ({direction})"
@@ -72,19 +85,22 @@ def explain_with_gemini(
     model_name: str | None = None,
     use_cache: bool = True,
 ) -> str:
-    """
-    Call Gemini to narrate a SHAP explanation.
-    Caches by match_id to stay within free-tier limits.
-    """
+    """Call Gemini to narrate a SHAP explanation. Caches successful Gemini replies."""
     ensure_dirs()
     match_id = str(context.get("match_id", ""))
     cache = _load_cache() if use_cache else {}
-    if use_cache and match_id and match_id in cache:
-        return cache[match_id]["text"]
+    api_key = _api_key()
 
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key or api_key.startswith("your_"):
-        # Offline fallback so the app still works without a key
+    if use_cache and match_id and match_id in cache:
+        entry = cache[match_id]
+        source = entry.get("source") if isinstance(entry, dict) else None
+        # Re-fetch if we only cached a template/fallback and a real key is now available
+        if source == "gemini" or not api_key:
+            text = entry.get("text") if isinstance(entry, dict) else str(entry)
+            if text:
+                return text
+
+    if not api_key:
         text = _fallback_explanation(context)
         if match_id:
             cache[match_id] = {"text": text, "source": "fallback"}
@@ -95,25 +111,44 @@ def explain_with_gemini(
         from google import genai
 
         client = genai.Client(api_key=api_key)
-        model = model_name or DEFAULT_MODEL
-        prompt = build_prompt(context)
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config={
-                "system_instruction": SYSTEM_PROMPT,
-                "temperature": 0.4,
-            },
-        )
-        text = (response.text or "").strip() or _fallback_explanation(context)
+        preferred = model_name or DEFAULT_MODEL
+        candidates = []
+        for m in [preferred, *MODEL_FALLBACKS]:
+            if m and m not in candidates:
+                candidates.append(m)
+
+        last_err: Exception | None = None
+        text = ""
+        used_model = preferred
+        for model in candidates:
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=build_prompt(context),
+                    config={
+                        "system_instruction": SYSTEM_PROMPT,
+                        "temperature": 0.4,
+                    },
+                )
+                text = (response.text or "").strip()
+                if text:
+                    used_model = model
+                    break
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+                continue
+
+        if not text:
+            raise last_err or RuntimeError("Gemini returned empty response")
+
         if match_id:
-            cache[match_id] = {"text": text, "source": "gemini", "model": model}
+            cache[match_id] = {"text": text, "source": "gemini", "model": used_model}
             _save_cache(cache)
         return text
-    except Exception as exc:  # noqa: BLE001 — surface friendly fallback
+    except Exception as exc:  # noqa: BLE001
         text = _fallback_explanation(context) + f"\n\n_(LLM unavailable: {exc})_"
         if match_id:
-            cache[match_id] = {"text": text, "source": "fallback_error"}
+            cache[match_id] = {"text": text, "source": "fallback_error", "error": str(exc)}
             _save_cache(cache)
         return text
 
@@ -126,9 +161,12 @@ def _fallback_explanation(context: dict) -> str:
     probs = context.get("probabilities", {})
     top = context.get("top_features", [])[:3]
     drivers = ", ".join(_friendly_feature(t["feature"]) for t in top) if top else "form and Elo"
-    pred_word = {"H": f"a {home} home win", "D": "a draw", "A": f"an {away} away win"}.get(
-        pred, pred
-    )
+    article = "an" if away[:1].lower() in "aeiou" else "a"
+    pred_word = {
+        "H": f"a {home} home win",
+        "D": "a draw",
+        "A": f"{article} {away} away win",
+    }.get(pred, pred)
     return (
         f"The model leans toward {pred_word} "
         f"(H {probs.get('H', 0):.0%} / D {probs.get('D', 0):.0%} / A {probs.get('A', 0):.0%}). "
@@ -153,7 +191,7 @@ def explain_match(shap_result: dict, meta: dict) -> str:
 
 if __name__ == "__main__":
     demo = {
-        "match_id": "demo",
+        "match_id": "demo_live",
         "home_team": "Arsenal",
         "away_team": "Chelsea",
         "date": "2024-04-01",
