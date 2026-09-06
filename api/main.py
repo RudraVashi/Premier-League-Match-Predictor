@@ -234,7 +234,7 @@ def _ingest_live_results(force: bool = False) -> set[str]:
         from src.results_fallback import apply_results_to_features, played_match_ids as live_played
 
         played_match_ids |= live_played(force=force)
-        apply_results_to_features(force=False)
+        apply_results_to_features(force=force)
     except Exception as exc:  # noqa: BLE001
         print(f"live results ingest skipped: {exc}")
     return played_match_ids
