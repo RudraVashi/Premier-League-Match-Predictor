@@ -160,34 +160,10 @@ def fixtures_upcoming(
     days: int = Query(21, ge=1, le=120, description="Only fixtures within N days"),
     refresh: bool = Query(False, description="Force re-download openfootball fixtures"),
 ):
-    from src.fixtures_refresh import filter_upcoming_frame, refresh_openfootball_statuses
+    from src.fixtures_refresh import filter_upcoming_frame
     from src.live_odds import attach_live_odds
 
-    # Soft refresh: openfootball + football-data results fallback (when OF lags)
-    played_match_ids: set[str] = set()
-    try:
-        fresh = refresh_openfootball_statuses(force=refresh)
-        if fresh is not None and not fresh.empty:
-            played = fresh[fresh["status"] == "played"].copy()
-            if not played.empty:
-                played["match_id"] = (
-                    pd.to_datetime(played["date"]).dt.strftime("%Y%m%d")
-                    + "_"
-                    + played["home_team"].str.replace(" ", "", regex=False)
-                    + "_"
-                    + played["away_team"].str.replace(" ", "", regex=False)
-                )
-                played_match_ids |= set(played["match_id"])
-    except Exception as exc:  # noqa: BLE001
-        print(f"fixture refresh skipped: {exc}")
-
-    try:
-        from src.results_fallback import apply_results_to_features, played_match_ids as fd_played
-
-        played_match_ids |= fd_played(force=refresh)
-        apply_results_to_features(force=False)
-    except Exception as exc:  # noqa: BLE001
-        print(f"football-data results fallback skipped: {exc}")
+    played_match_ids = _ingest_live_results(force=refresh)
 
     df = _read_parquet("upcoming_predictions.parquet")
     if df.empty:
@@ -233,6 +209,42 @@ def fixtures_upcoming(
     }
 
 
+def _ingest_live_results(force: bool = False) -> set[str]:
+    """Pull openfootball + FPL/football-data scores into features; return played ids."""
+    played_match_ids: set[str] = set()
+    try:
+        from src.fixtures_refresh import refresh_openfootball_statuses
+
+        fresh = refresh_openfootball_statuses(force=force)
+        if fresh is not None and not fresh.empty:
+            played = fresh[fresh["status"] == "played"].copy()
+            if not played.empty:
+                played["match_id"] = (
+                    pd.to_datetime(played["date"]).dt.strftime("%Y%m%d")
+                    + "_"
+                    + played["home_team"].str.replace(" ", "", regex=False)
+                    + "_"
+                    + played["away_team"].str.replace(" ", "", regex=False)
+                )
+                played_match_ids |= set(played["match_id"].astype(str))
+    except Exception as exc:  # noqa: BLE001
+        print(f"fixture refresh skipped: {exc}")
+
+    try:
+        from src.results_fallback import apply_results_to_features, played_match_ids as live_played
+
+        played_match_ids |= live_played(force=force)
+        apply_results_to_features(force=False)
+    except Exception as exc:  # noqa: BLE001
+        print(f"live results ingest skipped: {exc}")
+    return played_match_ids
+
+
+def _kickoff_sort_key(series: pd.Series) -> pd.Series:
+    s = series.astype(str).str.strip()
+    return s.where(~s.isin(["nan", "None", "<NA>", "NaT", ""]), "15:00")
+
+
 def ODDS_KEY_PRESENT() -> bool:
     import os
     from dotenv import load_dotenv
@@ -253,6 +265,7 @@ def fixtures_recent(
     with probs/correct joined from latest_predictions when available.
     Avoids stale May spillover from a mixed 40-row parquet artifact.
     """
+    _ingest_live_results(force=False)
     feats = _read_parquet("features.parquet", "matches_with_stats.parquet", "matches_with_odds.parquet")
     scored = _read_parquet("latest_predictions.parquet", "test_predictions.parquet")
     if feats.empty and scored.empty:
@@ -294,7 +307,12 @@ def fixtures_recent(
         ].astype(str).str.lower().str.contains(needle, regex=False)
         df = df[mask]
 
-    df = df.sort_values("date", ascending=False).head(limit)
+    if "kickoff" in df.columns:
+        df = df.assign(_ko=_kickoff_sort_key(df["kickoff"]))
+        df = df.sort_values(["date", "_ko"], ascending=[False, False]).drop(columns=["_ko"])
+    else:
+        df = df.sort_values("date", ascending=False)
+    df = df.head(limit)
 
     # Join model probs / correct from scored artifact when present
     if not scored.empty and "match_id" in df.columns and "match_id" in scored.columns:
@@ -307,8 +325,6 @@ def fixtures_recent(
                 "p_D",
                 "p_A",
                 "correct",
-                "home_form_str",
-                "away_form_str",
                 "odds_h",
                 "odds_d",
                 "odds_a",
@@ -352,6 +368,7 @@ def fixtures_recent(
     return {
         "count": len(df),
         "season": season or (str(df["season"].iloc[0]) if "season" in df.columns and len(df) else None),
+        "latest_matchday": int(df["matchday"].max()) if "matchday" in df.columns and df["matchday"].notna().any() else None,
         "matches": matches,
         "hit_rate": {
             "n": int(len(graded)),
@@ -453,22 +470,25 @@ def match_detail(match_id: str):
         detail["scorelines"] = []
 
     shap_payload = None
-    xgb_path = MODELS_DIR / "xgboost.joblib"
-    model_path = xgb_path if xgb_path.exists() else next(MODELS_DIR.glob("*.joblib"), None)
-    if model_path and model_path.exists() and not feats.empty:
-        bundle = joblib.load(model_path)
-        frow = feats[feats["match_id"] == match_id]
-        if not frow.empty:
-            shap_result = shap_top_features_for_row(bundle, frow.iloc[0])
-            top = []
-            for item in shap_result.get("top_features", [])[:8]:
-                top.append({**item, "label": friendly_feature(item["feature"])})
-            shap_payload = {
-                "predicted_class": shap_result["predicted_class"],
-                "probabilities": shap_result["probabilities"],
-                "top_features": top,
-                "model": model_path.stem,
-            }
+    try:
+        xgb_path = MODELS_DIR / "xgboost.joblib"
+        model_path = xgb_path if xgb_path.exists() else next(MODELS_DIR.glob("*.joblib"), None)
+        if model_path and model_path.exists() and not feats.empty:
+            bundle = joblib.load(model_path)
+            frow = feats[feats["match_id"] == match_id]
+            if not frow.empty:
+                shap_result = shap_top_features_for_row(bundle, frow.iloc[0])
+                top = []
+                for item in shap_result.get("top_features", [])[:8]:
+                    top.append({**item, "label": friendly_feature(item["feature"])})
+                shap_payload = {
+                    "predicted_class": shap_result["predicted_class"],
+                    "probabilities": shap_result["probabilities"],
+                    "top_features": top,
+                    "model": model_path.stem,
+                }
+    except Exception as exc:  # noqa: BLE001
+        print(f"shap skipped: {exc}")
     detail["shap"] = shap_payload
 
     for cache_name in ("upcoming_explanations.json", "latest_explanations.json", "llm_explanations.json"):
