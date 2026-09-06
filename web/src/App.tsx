@@ -57,6 +57,13 @@ function matchIncludesTeam(m: MatchCard, needle: string): boolean {
   return home.includes(needle) || away.includes(needle);
 }
 
+function byNewestFirst(a: MatchCard, b: MatchCard): number {
+  const da = a.date || "";
+  const db = b.date || "";
+  if (da !== db) return db.localeCompare(da);
+  return (b.kickoff || "15:00").localeCompare(a.kickoff || "15:00");
+}
+
 function ProbBars({ p }: { p: MatchCard["probabilities"] }) {
   const rows = [
     { key: "home", label: "Home", value: p.home, cls: "home" },
@@ -126,11 +133,12 @@ export default function App() {
   const [mode, setMode] = useState<Mode>("fans");
   const [upcoming, setUpcoming] = useState<MatchCard[]>([]);
   const [recent, setRecent] = useState<MatchCard[]>([]);
-  const [hitRate, setHitRate] = useState<HitRate | null>(null);
+  const [recentSeason, setRecentSeason] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<MatchCard | null>(null);
   const [metrics, setMetrics] = useState<any>(null);
   const [oddsNote, setOddsNote] = useState<string | null>(null);
+  const [hitRate, setHitRate] = useState<HitRate | null>(null);
   const [loading, setLoading] = useState(true);
   const [explaining, setExplaining] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -148,6 +156,7 @@ export default function App() {
         setUpcoming(u.matches);
         setRecent(r.matches);
         setHitRate(r.hit_rate || null);
+        setRecentSeason((r as any).season || null);
         setOddsNote((u as any).odds_note || null);
         const everton = u.matches.find(
           (m) =>
@@ -175,7 +184,10 @@ export default function App() {
     (async () => {
       try {
         const d = await fetchMatch(selectedId);
-        if (!cancelled) setDetail(d);
+        if (!cancelled) {
+          setDetail(d);
+          setError(null);
+        }
       } catch (e: any) {
         if (!cancelled) setError(e.message || String(e));
       }
@@ -196,12 +208,33 @@ export default function App() {
   const searching = Boolean(needle);
 
   const matchweeks = useMemo(() => {
+    // Fans: upcoming GWs only. Analyst: completed GWs only. Avoid mixing future weeks into results.
+    const source = searching
+      ? [...upcoming, ...recent]
+      : mode === "fans"
+        ? upcoming
+        : recent;
     const set = new Set<number>();
-    for (const m of [...upcoming, ...recent]) {
+    for (const m of source) {
       if (m.matchday != null && !Number.isNaN(Number(m.matchday))) set.add(Number(m.matchday));
     }
-    return Array.from(set).sort((a, b) => a - b);
-  }, [upcoming, recent]);
+    const weeks = Array.from(set).sort((a, b) => a - b);
+    // Analyst: newest completed GW first in the chip row
+    return mode === "analyst" && !searching ? weeks.slice().reverse() : weeks;
+  }, [mode, upcoming, recent, searching]);
+
+  // Analyst shows the full current-season slate (newest first), not a single GW.
+  useEffect(() => {
+    if (mode !== "analyst" || searching) return;
+    setMatchweek("all");
+  }, [mode, searching]);
+
+  // Switching to Analyst should land on the newest result, not a future Fans pick.
+  useEffect(() => {
+    if (mode !== "analyst" || searching || !recent.length) return;
+    const inRecent = recent.some((m) => m.match_id === selectedId);
+    if (!inRecent) setSelectedId(recent[0].match_id);
+  }, [mode, recent, searching, selectedId]);
 
   const clubHub = useMemo(() => {
     if (!searching) return null;
@@ -233,16 +266,11 @@ export default function App() {
       for (const m of [...upcoming, ...recent]) {
         if (matchIncludesTeam(m, needle)) byId.set(m.match_id, m);
       }
-      base = Array.from(byId.values()).sort((a, b) => {
-        const da = a.date || "";
-        const db = b.date || "";
-        if (da !== db) return db.localeCompare(da);
-        return (b.kickoff || "").localeCompare(a.kickoff || "");
-      });
+      base = Array.from(byId.values()).sort(byNewestFirst);
     } else if (mode === "fans") {
       base = upcoming;
     } else {
-      base = recent.length ? recent : upcoming;
+      base = [...(recent.length ? recent : upcoming)].sort(byNewestFirst);
     }
     if (matchweek !== "all") {
       base = base.filter((m) => Number(m.matchday) === matchweek);
@@ -254,7 +282,9 @@ export default function App() {
     ? `${teamQuery.trim()} fixtures`
     : mode === "fans"
       ? "This week's slate"
-      : "Recent results";
+      : recentSeason
+        ? `Recent results · ${recentSeason}`
+        : "Recent results";
 
   const shapChart = useMemo(() => {
     const top = detail?.shap?.top_features || [];
@@ -360,6 +390,12 @@ export default function App() {
             )}
 
             {mode === "fans" && !searching && oddsNote && <p className="odds-note">{oddsNote}</p>}
+            {mode === "analyst" && !searching && (
+              <p className="odds-note">
+                Graded picks for the current season, newest first. Older matchweeks stay in
+                the list — use the GW chips if you want to filter.
+              </p>
+            )}
             {searching && (
               <p className="odds-note">Club view: upcoming and recent for this team.</p>
             )}
@@ -594,21 +630,34 @@ export default function App() {
                       <th>Log loss</th>
                       <th>Brier</th>
                       <th>Accuracy</th>
+                      <th>Calibration</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {Object.entries(metrics.metrics).map(([name, m]: any) =>
+                    {Object.entries(metrics.metrics)
+                      .filter(([name]) => !name.startsWith("_"))
+                      .map(([name, m]: any) =>
                       m && typeof m === "object" && "log_loss" in m ? (
                         <tr key={name}>
                           <td>{name}</td>
                           <td>{m.log_loss.toFixed(4)}</td>
                           <td>{m.brier.toFixed(4)}</td>
                           <td>{(m.accuracy * 100).toFixed(1)}%</td>
+                          <td>{m.calibration || "—"}</td>
                         </tr>
                       ) : null
                     )}
                   </tbody>
                 </table>
+              )}
+              {metrics?.metrics?._meta?.best_model && (
+                <p className="muted" style={{ marginTop: "0.75rem" }}>
+                  Best production model:{" "}
+                  <strong style={{ color: "var(--ink)" }}>
+                    {metrics.metrics._meta.best_model}
+                  </strong>
+                  {" · "}hold-out from {metrics.metrics._meta.test_season_start}+
+                </p>
               )}
               {metrics?.ablation?.delta && (
                 <p className="muted" style={{ marginTop: "1rem" }}>

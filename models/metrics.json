@@ -1,14 +1,14 @@
 {
   "random_forest": {
     "name": "random_forest",
-    "log_loss": 0.9919365075195434,
-    "brier": 0.5900982560198996,
-    "accuracy": 0.5307359307359307,
+    "log_loss": 0.9956887673517298,
+    "brier": 0.5931358005083206,
+    "accuracy": 0.5255411255411255,
     "per_class": {
       "H": {
-        "precision": 0.547752808988764,
-        "recall": 0.781563126252505,
-        "f1": 0.6440957886044592,
+        "precision": 0.5686274509803921,
+        "recall": 0.6973947895791583,
+        "f1": 0.6264626462646264,
         "support": 499
       },
       "D": {
@@ -18,23 +18,51 @@
         "support": 282
       },
       "A": {
-        "precision": 0.5033860045146726,
-        "recall": 0.5962566844919787,
-        "f1": 0.5458996328029376,
+        "precision": 0.47697974217311234,
+        "recall": 0.6925133689839572,
+        "f1": 0.5648854961832062,
         "support": 374
       }
-    }
+    },
+    "calibration": "sigmoid"
   },
   "xgboost": {
     "name": "xgboost",
-    "log_loss": 1.0008804865265406,
-    "brier": 0.597235725848652,
-    "accuracy": 0.5168831168831168,
+    "log_loss": 1.0126357774029557,
+    "brier": 0.6044032001187334,
+    "accuracy": 0.4987012987012987,
     "per_class": {
       "H": {
-        "precision": 0.530446549391069,
-        "recall": 0.7855711422845691,
-        "f1": 0.6332794830371568,
+        "precision": 0.5447409733124019,
+        "recall": 0.6953907815631263,
+        "f1": 0.6109154929577465,
+        "support": 499
+      },
+      "D": {
+        "precision": 0.3,
+        "recall": 0.010638297872340425,
+        "f1": 0.02054794520547945,
+        "support": 282
+      },
+      "A": {
+        "precision": 0.4448818897637795,
+        "recall": 0.6042780748663101,
+        "f1": 0.5124716553287982,
+        "support": 374
+      }
+    },
+    "calibration": "sigmoid"
+  },
+  "logistic": {
+    "name": "logistic",
+    "log_loss": 0.9894818085572233,
+    "brier": 0.5897509401142564,
+    "accuracy": 0.522077922077922,
+    "per_class": {
+      "H": {
+        "precision": 0.5657686212361331,
+        "recall": 0.7154308617234469,
+        "f1": 0.631858407079646,
         "support": 499
       },
       "D": {
@@ -44,12 +72,46 @@
         "support": 282
       },
       "A": {
-        "precision": 0.4939759036144578,
-        "recall": 0.5481283422459893,
-        "f1": 0.5196451204055766,
+        "precision": 0.46946564885496184,
+        "recall": 0.6577540106951871,
+        "f1": 0.5478841870824054,
         "support": 374
       }
-    }
+    },
+    "calibration": "sigmoid"
+  },
+  "elo_logistic": {
+    "name": "elo_logistic",
+    "log_loss": 0.9920280620154516,
+    "brier": 0.5916618844447935,
+    "accuracy": 0.5203463203463203,
+    "per_class": {
+      "H": {
+        "precision": 0.5711920529801324,
+        "recall": 0.6913827655310621,
+        "f1": 0.6255666364460563,
+        "support": 499
+      },
+      "D": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "support": 282
+      },
+      "A": {
+        "precision": 0.4646098003629764,
+        "recall": 0.6844919786096256,
+        "f1": 0.5535135135135135,
+        "support": 374
+      }
+    },
+    "calibration": "sigmoid",
+    "features": [
+      "home_elo",
+      "away_elo",
+      "elo_diff",
+      "elo_expected_home"
+    ]
   },
   "bookmaker": {
     "name": "bookmaker",
@@ -102,5 +164,17 @@
         "support": 374
       }
     }
+  },
+  "_meta": {
+    "best_model": "logistic",
+    "calibration_methods": {
+      "random_forest": "sigmoid",
+      "xgboost": "sigmoid",
+      "logistic": "sigmoid",
+      "elo_logistic": "sigmoid"
+    },
+    "test_season_start": "2023-24",
+    "n_train": 8947,
+    "n_test": 1155
   }
 }

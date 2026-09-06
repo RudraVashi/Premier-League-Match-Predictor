@@ -15,15 +15,33 @@ from src.utils import CACHE_DIR, DATA_PROCESSED, MODELS_DIR, ensure_dirs
 
 
 def _unwrap_base_estimator(calibrated_model):
-    """Best-effort unwrap CalibratedClassifierCV -> underlying tree model."""
-    if hasattr(calibrated_model, "calibrated_classifiers_"):
-        cc = calibrated_model.calibrated_classifiers_[0]
-        for attr in ("estimator", "base_estimator", "clf"):
-            if hasattr(cc, attr):
-                return getattr(cc, attr)
-    if hasattr(calibrated_model, "estimator"):
-        return calibrated_model.estimator
-    return calibrated_model
+    """Unwrap CalibratedClassifierCV / FrozenEstimator to the fitted tree model."""
+    model = calibrated_model
+    seen: set[int] = set()
+    for _ in range(8):
+        ident = id(model)
+        if ident in seen:
+            break
+        seen.add(ident)
+        nxt = None
+        ccs = getattr(model, "calibrated_classifiers_", None)
+        if ccs:
+            cc = ccs[0]
+            for attr in ("estimator", "base_estimator", "clf"):
+                cand = getattr(cc, attr, None)
+                if cand is not None:
+                    nxt = cand
+                    break
+        if nxt is None:
+            for attr in ("estimator", "base_estimator"):
+                cand = getattr(model, attr, None)
+                if cand is not None and cand is not model:
+                    nxt = cand
+                    break
+        if nxt is None:
+            break
+        model = nxt
+    return model
 
 
 def compute_shap_for_frame(

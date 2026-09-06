@@ -38,13 +38,19 @@ def load_best_model() -> tuple[str, dict]:
     name = "xgboost"
     if metrics_path.exists():
         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-        candidates = {
-            k: v["log_loss"]
-            for k, v in metrics.items()
-            if isinstance(v, dict) and "log_loss" in v and k in ("xgboost", "random_forest")
-        }
-        if candidates:
-            name = min(candidates, key=candidates.get)
+        meta = metrics.get("_meta") if isinstance(metrics.get("_meta"), dict) else {}
+        if meta.get("best_model") and (MODELS_DIR / f"{meta['best_model']}.joblib").exists():
+            name = meta["best_model"]
+        else:
+            candidates = {
+                k: v["log_loss"]
+                for k, v in metrics.items()
+                if isinstance(v, dict)
+                and "log_loss" in v
+                and k in ("xgboost", "random_forest", "logistic")
+            }
+            if candidates:
+                name = min(candidates, key=candidates.get)
     path = MODELS_DIR / f"{name}.joblib"
     if not path.exists():
         raise FileNotFoundError(f"No trained model at {path}. Run training first.")
@@ -210,10 +216,10 @@ def predict_upcoming(
 
 def predict_upcoming_from_history(
     merged: pd.DataFrame | None = None,
-    n_recent: int = 20,
+    n_recent: int = 40,
     with_llm: bool = False,
 ) -> pd.DataFrame:
-    """Score recent played matches (for history / analyst views)."""
+    """Score recent played matches (for history / analyst views). Prefer current season."""
     ensure_dirs()
     if merged is None:
         path = DATA_PROCESSED / "matches_with_stats.parquet"
@@ -226,6 +232,12 @@ def predict_upcoming_from_history(
     model_name, bundle = load_best_model()
 
     played = feats[feats.get("status", "played") != "scheduled"].copy()
+    played = played[played["outcome"].notna()] if "outcome" in played.columns else played
+    if "season" in played.columns and not played.empty:
+        newest = sorted(played["season"].dropna().unique())[-1]
+        current = played[played["season"] == newest]
+        if len(current) >= 5:
+            played = current
     recent = played.sort_values("date").tail(n_recent).copy()
     scored = _score_frame(recent, bundle, model_name)
 
@@ -236,6 +248,7 @@ def predict_upcoming_from_history(
             "match_id",
             "date",
             "season",
+            "matchday",
             "home_team",
             "away_team",
             "outcome",
