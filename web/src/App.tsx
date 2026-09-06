@@ -225,7 +225,7 @@ export default function App() {
 
   // Analyst shows the full current-season slate (newest first), not a single GW.
   useEffect(() => {
-    if (searching) return;
+    if (mode !== "analyst" || searching) return;
     setMatchweek("all");
   }, [mode, searching]);
 
